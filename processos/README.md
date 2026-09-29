@@ -6,15 +6,19 @@ Compile com:
 make
 ```
 
-Execute informando iterações, quantidade de processos e seed:
+Execute informando carros, tamanho das vias, tempo do semáforo, iterações,
+quantidade de processos e seed:
 
 ```bash
-./processos 10000000 4 123
+./processos 100000 100000 30 3000 4 123
 ```
 
-Troque `4` por `2` ou `8` para mudar a quantidade de processos. Os processos
-calculam blocos diferentes das chegadas e escrevem em memória compartilhada.
-Um semáforo POSIX protege a soma compartilhada dos carros gerados.
+Troque `4` por `2` ou `8` para mudar a quantidade de processos. O pai cria as
+vias, o cruzamento, a barreira e o semáforo numa área de memória compartilhada
+(`mmap` com `MAP_SHARED | MAP_ANONYMOUS`) e depois cria os filhos com `fork`.
+Cada filho move os carros de um bloco de posições das vias. Um semáforo POSIX
+(`sem_wait`/`sem_post`) protege a entrada no cruzamento, e uma barreira
+compartilhada entre processos separa as fases de cada iteração.
 
 Para apagar o executável:
 

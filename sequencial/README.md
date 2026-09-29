@@ -6,14 +6,18 @@ Compile com:
 make
 ```
 
-Execute informando o número de iterações e a seed:
+Execute informando carros, tamanho das vias, tempo do semáforo, iterações e
+seed:
 
 ```bash
-./sequencial 10000000 123
+./sequencial 100000 100000 30 3000 123
 ```
 
-Nesta versão, um único fluxo calcula as chegadas, atualiza as quatro filas e
-libera os carros das direções que estão com sinal verde.
+Um único fluxo percorre as iterações. Em cada uma, move os carros das quatro
+vias (cada carro anda uma posição se a da frente estiver livre), deixa entrar
+no cruzamento o carro da linha de parada das vias com sinal verde e, por fim,
+faz os carros de dentro do cruzamento avançarem. Esta versão é a referência de
+resultado e de tempo para as versões paralelas.
 
 Para apagar o executável:
 

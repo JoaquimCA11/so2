@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -7,128 +8,255 @@
 #include <time.h>
 
 enum {
-    NUM_DIRECOES = 4,
+    NUM_VIAS = 4,
     NORTE = 0,
     SUL = 1,
     LESTE = 2,
     OESTE = 3,
-    DURACAO_VERDE = 10,
-    RODADAS_CALCULO = 32,
+    CHANCE_HESITAR = 10, /* % de chance de um motorista não avançar */
     MAX_THREADS = 256
 };
 
+/*
+ * O cruzamento tem 2x2 células e o trânsito anda pela mão direita. Cada via
+ * atravessa por duas células: entra na primeira e depois passa para a segunda.
+ * Vias do mesmo eixo (Norte/Sul ou Leste/Oeste) não usam células em comum.
+ */
+enum {
+    NOROESTE = 0,
+    NORDESTE = 1,
+    SUDOESTE = 2,
+    SUDESTE = 3,
+    CELULAS_CRUZAMENTO = 4
+};
+
+static const int PRIMEIRA_CELULA[NUM_VIAS] = {NOROESTE, SUDESTE, NORDESTE,
+                                              SUDOESTE};
+static const int SEGUNDA_CELULA[NUM_VIAS] = {SUDOESTE, NORDESTE, NOROESTE,
+                                             SUDESTE};
+static const char *const NOME_VIA[NUM_VIAS] = {"Norte", "Sul", "Leste",
+                                               "Oeste"};
+
 typedef struct {
-    uint64_t filas[NUM_DIRECOES];
-    uint64_t carros_gerados;
-    uint64_t carros_passaram;
-} Simulacao;
+    uint64_t carros;
+    uint64_t tamanho_via;
+    uint64_t tempo_semaforo;
+    uint64_t iteracoes;
+    uint64_t seed;
+} Parametros;
+
+/* O mutex fica junto do recurso que ele protege. */
+typedef struct {
+    pthread_mutex_t mutex;
+    unsigned char celulas[CELULAS_CRUZAMENTO]; /* 0 = livre, via + 1 = ocupada */
+    uint64_t carros_no_cruzamento;
+    uint64_t carros_atravessaram;
+} Cruzamento;
 
 typedef struct {
     int id;
     int num_threads;
-    uint64_t iteracoes;
-    uint64_t seed;
-    unsigned char *chegadas;
-    uint64_t *total_gerado;
-    pthread_mutex_t *mutex_total;
+    const Parametros *parametros;
+    Cruzamento *cruzamento;
+    unsigned char *celulas;
+    pthread_barrier_t *barreira;
 } ArgumentosThread;
 
-static unsigned char gerar_carros(uint64_t seed, uint64_t iteracao,
-                                  int direcao) {
-    uint64_t valor;
-    int rodada;
+/*
+ * Número pseudoaleatório que depende somente dos argumentos. Assim o sorteio
+ * de um carro não depende de qual trabalhador o calcula nem da ordem.
+ */
+static uint64_t sortear(uint64_t seed, uint64_t iteracao, uint64_t via,
+                        uint64_t posicao) {
+    uint64_t valor = seed;
 
-    valor = seed;
     valor ^= (iteracao + 1) * 0x9E3779B97F4A7C15ULL;
-    valor ^= (uint64_t)(direcao + 1) * 0xBF58476D1CE4E5B9ULL;
-
-    for (rodada = 0; rodada < RODADAS_CALCULO; rodada++) {
-        valor ^= valor >> 12;
-        valor ^= valor << 25;
-        valor ^= valor >> 27;
-        valor *= 0x2545F4914F6CDD1DULL;
-        valor += (uint64_t)rodada + 0x94D049BB133111EBULL;
-    }
-
-    return (unsigned char)((valor % 100) < 25);
+    valor ^= (via + 1) * 0xC2B2AE3D27D4EB4FULL;
+    valor ^= (posicao + 1) * 0x165667B19E3779F9ULL;
+    valor ^= valor >> 30;
+    valor *= 0xBF58476D1CE4E5B9ULL;
+    valor ^= valor >> 27;
+    valor *= 0x94D049BB133111EBULL;
+    valor ^= valor >> 31;
+    return valor;
 }
 
-static uint64_t inicio_do_bloco(uint64_t iteracoes, int id,
-                                int num_threads) {
-    uint64_t tamanho = iteracoes / (uint64_t)num_threads;
-    uint64_t sobra = iteracoes % (uint64_t)num_threads;
+/*
+ * Coloca exatamente carros / 4 carros em cada via, em posições sorteadas.
+ * O sorteio da posição inicial usa via + NUM_VIAS para não coincidir com o
+ * sorteio de hesitação.
+ */
+static void distribuir_carros(const Parametros *p, unsigned char *celulas) {
+    int via;
+
+    for (via = 0; via < NUM_VIAS; via++) {
+        unsigned char *trecho = celulas + (uint64_t)via * p->tamanho_via;
+        uint64_t restantes = p->carros / NUM_VIAS +
+                             ((uint64_t)via < p->carros % NUM_VIAS ? 1 : 0);
+        uint64_t posicao;
+
+        for (posicao = 0; posicao < p->tamanho_via; posicao++) {
+            uint64_t livres = p->tamanho_via - posicao;
+            uint64_t sorteio = sortear(p->seed, 0, (uint64_t)via + NUM_VIAS,
+                                       posicao);
+            unsigned char recebe = (unsigned char)(sorteio % livres < restantes);
+
+            trecho[posicao] = recebe;
+            restantes -= recebe;
+        }
+    }
+}
+
+static int sinal_verde(const Parametros *p, int via, uint64_t iteracao) {
+    int verde_norte_sul = (iteracao / p->tempo_semaforo) % 2 == 0;
+    int via_norte_sul = via == NORTE || via == SUL;
+    return verde_norte_sul == via_norte_sul;
+}
+
+/*
+ * Região crítica: duas threads (por exemplo, as donas das vias Norte e Sul)
+ * podem tentar entrar no mesmo passo. Verificar se a célula está livre,
+ * ocupá-la e atualizar o contador precisa acontecer de uma vez só.
+ * noinline: a parte que muda entre as versões fica fora do laço principal.
+ */
+__attribute__((noinline)) static int tentar_entrar_no_cruzamento(Cruzamento *cruzamento, int via) {
+    int celula = PRIMEIRA_CELULA[via];
+    int entrou = 0;
+
+    pthread_mutex_lock(&cruzamento->mutex);
+    if (cruzamento->celulas[celula] == 0) {
+        cruzamento->celulas[celula] = (unsigned char)(via + 1);
+        cruzamento->carros_no_cruzamento++;
+        entrou = 1;
+    }
+    pthread_mutex_unlock(&cruzamento->mutex);
+    return entrou;
+}
+
+/* O carro anda se a célula da frente estiver livre e o motorista não hesitar. */
+static int carro_avanca(const Parametros *p, const unsigned char *trecho,
+                        int via, uint64_t posicao, uint64_t iteracao) {
+    return trecho[posicao] && !trecho[posicao + 1] &&
+           sortear(p->seed, iteracao, (uint64_t)via, posicao) % 100 >=
+               CHANCE_HESITAR;
+}
+
+/*
+ * Calcula as posições [inicio, fim) de uma via na próxima iteração. Lê somente
+ * o estado atual e escreve somente nas próprias posições do estado seguinte.
+ * A última posição é a linha de parada, de onde o carro entra no cruzamento.
+ *
+ * noinline (extensão do GCC) mantém este laço, que consome quase todo o
+ * tempo, como uma função separada nas três versões. Sem isso o compilador o
+ * encaixa de formas diferentes em cada programa e o mesmo laço chega a variar
+ * 15% de tempo, o que distorceria a comparação entre as versões.
+ */
+__attribute__((noinline)) static void atualizar_trecho(const Parametros *p, Cruzamento *cruzamento,
+                             const unsigned char *atual,
+                             unsigned char *proxima, int via, uint64_t inicio,
+                             uint64_t fim, uint64_t iteracao) {
+    uint64_t ultima = p->tamanho_via - 1;
+    int chega = inicio > 0 && carro_avanca(p, atual, via, inicio - 1, iteracao);
+    uint64_t posicao;
+
+    for (posicao = inicio; posicao < fim; posicao++) {
+        int sai = 0;
+
+        if (atual[posicao]) {
+            if (posicao < ultima) {
+                sai = carro_avanca(p, atual, via, posicao, iteracao);
+            } else if (sinal_verde(p, via, iteracao)) {
+                sai = tentar_entrar_no_cruzamento(cruzamento, via);
+            }
+        }
+
+        proxima[posicao] = (unsigned char)((atual[posicao] && !sai) || chega);
+        chega = sai;
+    }
+}
+
+/*
+ * As quatro vias ficam em sequência na memória. Um bloco [inicio, fim) pode
+ * cobrir uma via inteira, parte dela ou várias vias.
+ */
+static void atualizar_bloco(const Parametros *p, Cruzamento *cruzamento,
+                            unsigned char *celulas, uint64_t inicio,
+                            uint64_t fim, uint64_t iteracao) {
+    uint64_t total = NUM_VIAS * p->tamanho_via;
+    const unsigned char *atual = celulas + (iteracao % 2) * total;
+    unsigned char *proxima = celulas + ((iteracao + 1) % 2) * total;
+    int via;
+
+    for (via = 0; via < NUM_VIAS; via++) {
+        uint64_t comeco_via = (uint64_t)via * p->tamanho_via;
+        uint64_t fim_via = comeco_via + p->tamanho_via;
+        uint64_t de = inicio > comeco_via ? inicio : comeco_via;
+        uint64_t ate = fim < fim_via ? fim : fim_via;
+
+        if (de < ate) {
+            atualizar_trecho(p, cruzamento, atual + comeco_via,
+                             proxima + comeco_via, via, de - comeco_via,
+                             ate - comeco_via, iteracao);
+        }
+    }
+}
+
+/* Carros na segunda célula saem; carros na primeira passam para a segunda. */
+static void avancar_cruzamento(Cruzamento *cruzamento) {
+    unsigned char novas[CELULAS_CRUZAMENTO] = {0, 0, 0, 0};
+    int celula;
+
+    for (celula = 0; celula < CELULAS_CRUZAMENTO; celula++) {
+        int ocupante = cruzamento->celulas[celula];
+
+        if (ocupante == 0) {
+            continue;
+        }
+        if (celula == SEGUNDA_CELULA[ocupante - 1]) {
+            cruzamento->carros_no_cruzamento--;
+            cruzamento->carros_atravessaram++;
+        } else {
+            novas[SEGUNDA_CELULA[ocupante - 1]] = (unsigned char)ocupante;
+        }
+    }
+
+    for (celula = 0; celula < CELULAS_CRUZAMENTO; celula++) {
+        cruzamento->celulas[celula] = novas[celula];
+    }
+}
+
+static uint64_t inicio_do_bloco(uint64_t total, int id, int num_threads) {
+    uint64_t tamanho = total / (uint64_t)num_threads;
+    uint64_t sobra = total % (uint64_t)num_threads;
     uint64_t extras = (uint64_t)id < sobra ? (uint64_t)id : sobra;
     return (uint64_t)id * tamanho + extras;
 }
 
-static uint64_t fim_do_bloco(uint64_t iteracoes, int id, int num_threads) {
-    return inicio_do_bloco(iteracoes, id + 1, num_threads);
-}
-
 static void *trabalho_da_thread(void *argumento) {
     ArgumentosThread *args = (ArgumentosThread *)argumento;
-    uint64_t inicio = inicio_do_bloco(args->iteracoes, args->id,
-                                      args->num_threads);
-    uint64_t fim = fim_do_bloco(args->iteracoes, args->id,
-                                args->num_threads);
-    uint64_t total_local = 0;
+    const Parametros *p = args->parametros;
+    uint64_t total = NUM_VIAS * p->tamanho_via;
+    uint64_t inicio = inicio_do_bloco(total, args->id, args->num_threads);
+    uint64_t fim = inicio_do_bloco(total, args->id + 1, args->num_threads);
     uint64_t iteracao;
 
-    /* Divisao do trabalho: cada thread calcula um bloco de iteracoes. */
-    for (iteracao = inicio; iteracao < fim; iteracao++) {
-        int direcao;
+    for (iteracao = 0; iteracao < p->iteracoes; iteracao++) {
+        /* Fase 1 (paralela): cada thread move os carros do seu bloco. */
+        atualizar_bloco(p, args->cruzamento, args->celulas, inicio, fim,
+                        iteracao);
 
-        for (direcao = 0; direcao < NUM_DIRECOES; direcao++) {
-            unsigned char chegou = gerar_carros(args->seed, iteracao, direcao);
-            args->chegadas[iteracao * NUM_DIRECOES + (uint64_t)direcao] =
-                chegou;
-            total_local += chegou;
+        /* Todas terminam a fase 1 antes de o cruzamento andar. */
+        pthread_barrier_wait(args->barreira);
+
+        /* Fase 2 (uma thread): os carros dentro do cruzamento andam. */
+        if (args->id == 0) {
+            avancar_cruzamento(args->cruzamento);
         }
-    }
 
-    /* Regiao critica: somente uma thread altera o total por vez. */
-    pthread_mutex_lock(args->mutex_total);
-    *args->total_gerado += total_local;
-    pthread_mutex_unlock(args->mutex_total);
+        /* Ninguém começa a próxima iteração com o cruzamento desatualizado. */
+        pthread_barrier_wait(args->barreira);
+    }
     return NULL;
-}
-
-static void processar_direcao(Simulacao *simulacao, int direcao) {
-    if (simulacao->filas[direcao] > 0) {
-        simulacao->filas[direcao]--;
-        simulacao->carros_passaram++;
-    }
-}
-
-static void atualizar_semaforo_e_passar(Simulacao *simulacao,
-                                         uint64_t iteracao) {
-    uint64_t fase = (iteracao / DURACAO_VERDE) % 2;
-
-    if (fase == 0) {
-        processar_direcao(simulacao, NORTE);
-        processar_direcao(simulacao, SUL);
-    } else {
-        processar_direcao(simulacao, LESTE);
-        processar_direcao(simulacao, OESTE);
-    }
-}
-
-static void aplicar_chegadas(Simulacao *simulacao,
-                             const unsigned char *chegadas,
-                             uint64_t total_gerado, uint64_t iteracoes) {
-    uint64_t iteracao;
-
-    simulacao->carros_gerados = total_gerado;
-
-    for (iteracao = 0; iteracao < iteracoes; iteracao++) {
-        int direcao;
-
-        for (direcao = 0; direcao < NUM_DIRECOES; direcao++) {
-            simulacao->filas[direcao] +=
-                chegadas[iteracao * NUM_DIRECOES + (uint64_t)direcao];
-        }
-        atualizar_semaforo_e_passar(simulacao, iteracao);
-    }
 }
 
 static double diferenca_em_segundos(struct timespec inicio,
@@ -138,41 +266,56 @@ static double diferenca_em_segundos(struct timespec inicio,
     return segundos + nanossegundos;
 }
 
-static void mostrar_resultado(const Simulacao *simulacao,
-                              uint64_t iteracoes, int num_threads,
+/* A fila é formada pelos carros encostados atrás da linha de parada. */
+static void mostrar_resultado(const Parametros *p,
+                              const Cruzamento *cruzamento,
+                              const unsigned char *celulas, int num_threads,
                               double tempo) {
-    uint64_t esperando = 0;
-    int direcao;
+    uint64_t filas[NUM_VIAS] = {0, 0, 0, 0};
+    uint64_t nas_vias = 0;
+    int via;
 
-    for (direcao = 0; direcao < NUM_DIRECOES; direcao++) {
-        esperando += simulacao->filas[direcao];
+    for (via = 0; via < NUM_VIAS; via++) {
+        const unsigned char *trecho = celulas + (uint64_t)via * p->tamanho_via;
+        uint64_t posicao;
+
+        for (posicao = 0; posicao < p->tamanho_via; posicao++) {
+            nas_vias += trecho[posicao];
+        }
+        for (posicao = p->tamanho_via; posicao > 0 && trecho[posicao - 1];
+             posicao--) {
+            filas[via]++;
+        }
     }
 
     printf("Simulação finalizada\n\n");
-    printf("Iterações: %llu\n", (unsigned long long)iteracoes);
-    printf("Número de threads: %d\n", num_threads);
-    printf("Carros gerados: %llu\n",
-           (unsigned long long)simulacao->carros_gerados);
-    printf("Carros que passaram: %llu\n",
-           (unsigned long long)simulacao->carros_passaram);
-    printf("Carros esperando: %llu\n\n", (unsigned long long)esperando);
-    printf("Fila Norte: %llu\n", (unsigned long long)simulacao->filas[NORTE]);
-    printf("Fila Sul: %llu\n", (unsigned long long)simulacao->filas[SUL]);
-    printf("Fila Leste: %llu\n", (unsigned long long)simulacao->filas[LESTE]);
-    printf("Fila Oeste: %llu\n\n", (unsigned long long)simulacao->filas[OESTE]);
-    printf("Tempo de execução: %.6f segundos\n", tempo);
+    printf("Carros: %llu\n", (unsigned long long)p->carros);
+    printf("Tamanho das vias: %llu\n", (unsigned long long)p->tamanho_via);
+    printf("Tempo do semáforo: %llu\n", (unsigned long long)p->tempo_semaforo);
+    printf("Iterações: %llu\n", (unsigned long long)p->iteracoes);
+    printf("Número de threads: %d\n\n", num_threads);
+    printf("Carros que atravessaram: %llu\n",
+           (unsigned long long)cruzamento->carros_atravessaram);
+    printf("Carros no cruzamento: %llu\n",
+           (unsigned long long)cruzamento->carros_no_cruzamento);
+    printf("Carros nas vias: %llu\n\n", (unsigned long long)nas_vias);
+    for (via = 0; via < NUM_VIAS; via++) {
+        printf("Fila %s: %llu\n", NOME_VIA[via], (unsigned long long)filas[via]);
+    }
+    printf("\nTempo de execução: %.6f segundos\n", tempo);
 }
 
 static int ler_uint64(const char *texto, uint64_t *valor) {
     char *fim;
     unsigned long long numero;
 
-    if (texto[0] == '-') {
+    if (texto[0] == '\0' || texto[0] == '-') {
         return 0;
     }
 
+    errno = 0;
     numero = strtoull(texto, &fim, 10);
-    if (texto[0] == '\0' || *fim != '\0') {
+    if (errno != 0 || *fim != '\0') {
         return 0;
     }
 
@@ -193,53 +336,70 @@ static int ler_num_threads(const char *texto, int *num_threads) {
     return 1;
 }
 
+static int validar_parametros(const Parametros *p) {
+    if (p->tamanho_via == 0 || p->tempo_semaforo == 0 || p->iteracoes == 0) {
+        fprintf(stderr, "TAMANHO_VIA, TEMPO_SEMAFORO e ITERACOES devem ser "
+                        "maiores que zero.\n");
+        return 0;
+    }
+    if (p->tamanho_via > SIZE_MAX / (2 * NUM_VIAS)) {
+        fprintf(stderr, "TAMANHO_VIA grande demais para a memória.\n");
+        return 0;
+    }
+    if (p->carros > NUM_VIAS * p->tamanho_via) {
+        fprintf(stderr, "CARROS não pode passar de 4 * TAMANHO_VIA.\n");
+        return 0;
+    }
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
-    uint64_t iteracoes;
-    uint64_t seed;
+    Parametros p;
+    Cruzamento cruzamento = {PTHREAD_MUTEX_INITIALIZER, {0, 0, 0, 0}, 0, 0};
     int num_threads;
-    size_t bytes_chegadas;
-    unsigned char *chegadas;
+    unsigned char *celulas;
+    uint64_t total;
     pthread_t *threads;
     ArgumentosThread *argumentos;
-    pthread_mutex_t mutex_total;
-    uint64_t total_gerado = 0;
-    int criadas = 0;
-    int houve_erro = 0;
+    pthread_barrier_t barreira;
     int id;
-    Simulacao simulacao = {{0, 0, 0, 0}, 0, 0};
     struct timespec inicio;
     struct timespec fim;
 
-    if (argc != 4 || !ler_uint64(argv[1], &iteracoes) ||
-        !ler_num_threads(argv[2], &num_threads) ||
-        !ler_uint64(argv[3], &seed) || iteracoes == 0) {
-        fprintf(stderr, "Uso: %s ITERACOES THREADS SEED\n", argv[0]);
-        fprintf(stderr, "ITERACOES deve ser positiva e THREADS deve estar entre 1 e %d.\n",
-                MAX_THREADS);
+    if (argc != 7 || !ler_uint64(argv[1], &p.carros) ||
+        !ler_uint64(argv[2], &p.tamanho_via) ||
+        !ler_uint64(argv[3], &p.tempo_semaforo) ||
+        !ler_uint64(argv[4], &p.iteracoes) ||
+        !ler_num_threads(argv[5], &num_threads) ||
+        !ler_uint64(argv[6], &p.seed)) {
+        fprintf(stderr,
+                "Uso: %s CARROS TAMANHO_VIA TEMPO_SEMAFORO ITERACOES THREADS "
+                "SEED\n",
+                argv[0]);
+        fprintf(stderr, "THREADS deve estar entre 1 e %d.\n", MAX_THREADS);
+        return EXIT_FAILURE;
+    }
+    if (!validar_parametros(&p)) {
         return EXIT_FAILURE;
     }
 
-    if (iteracoes > (uint64_t)(SIZE_MAX / NUM_DIRECOES)) {
-        fprintf(stderr, "Número de iterações grande demais para a memória.\n");
-        return EXIT_FAILURE;
-    }
-
-    bytes_chegadas = (size_t)(iteracoes * NUM_DIRECOES);
-    chegadas = malloc(bytes_chegadas);
+    /* Dois estados das vias: o atual e o da próxima iteração. */
+    total = NUM_VIAS * p.tamanho_via;
+    celulas = malloc((size_t)(2 * total));
     threads = malloc((size_t)num_threads * sizeof(pthread_t));
     argumentos = malloc((size_t)num_threads * sizeof(ArgumentosThread));
-
-    if (chegadas == NULL || threads == NULL || argumentos == NULL) {
+    if (celulas == NULL || threads == NULL || argumentos == NULL) {
         fprintf(stderr, "Não foi possível reservar memória.\n");
-        free(chegadas);
+        free(celulas);
         free(threads);
         free(argumentos);
         return EXIT_FAILURE;
     }
+    distribuir_carros(&p, celulas);
 
-    if (pthread_mutex_init(&mutex_total, NULL) != 0) {
-        fprintf(stderr, "Não foi possível criar o mutex.\n");
-        free(chegadas);
+    if (pthread_barrier_init(&barreira, NULL, (unsigned)num_threads) != 0) {
+        fprintf(stderr, "Não foi possível criar a barreira.\n");
+        free(celulas);
         free(threads);
         free(argumentos);
         return EXIT_FAILURE;
@@ -250,42 +410,32 @@ int main(int argc, char *argv[]) {
     for (id = 0; id < num_threads; id++) {
         argumentos[id].id = id;
         argumentos[id].num_threads = num_threads;
-        argumentos[id].iteracoes = iteracoes;
-        argumentos[id].seed = seed;
-        argumentos[id].chegadas = chegadas;
-        argumentos[id].total_gerado = &total_gerado;
-        argumentos[id].mutex_total = &mutex_total;
+        argumentos[id].parametros = &p;
+        argumentos[id].cruzamento = &cruzamento;
+        argumentos[id].celulas = celulas;
+        argumentos[id].barreira = &barreira;
 
         if (pthread_create(&threads[id], NULL, trabalho_da_thread,
                            &argumentos[id]) != 0) {
+            /* As threads já criadas ficariam presas na barreira. */
             fprintf(stderr, "Não foi possível criar a thread %d.\n", id);
-            houve_erro = 1;
-            break;
-        }
-        criadas++;
-    }
-
-    /* Sincronizacao: a principal so usa as chegadas depois dos joins. */
-    for (id = 0; id < criadas; id++) {
-        if (pthread_join(threads[id], NULL) != 0) {
-            houve_erro = 1;
+            exit(EXIT_FAILURE);
         }
     }
 
-    if (criadas != num_threads) {
-        houve_erro = 1;
+    for (id = 0; id < num_threads; id++) {
+        pthread_join(threads[id], NULL);
     }
 
-    if (!houve_erro) {
-        aplicar_chegadas(&simulacao, chegadas, total_gerado, iteracoes);
-        clock_gettime(CLOCK_MONOTONIC, &fim);
-        mostrar_resultado(&simulacao, iteracoes, num_threads,
-                          diferenca_em_segundos(inicio, fim));
-    }
+    clock_gettime(CLOCK_MONOTONIC, &fim);
 
-    pthread_mutex_destroy(&mutex_total);
-    free(chegadas);
+    mostrar_resultado(&p, &cruzamento, celulas + (p.iteracoes % 2) * total,
+                      num_threads, diferenca_em_segundos(inicio, fim));
+
+    pthread_barrier_destroy(&barreira);
+    pthread_mutex_destroy(&cruzamento.mutex);
+    free(celulas);
     free(threads);
     free(argumentos);
-    return houve_erro ? EXIT_FAILURE : EXIT_SUCCESS;
+    return EXIT_SUCCESS;
 }
