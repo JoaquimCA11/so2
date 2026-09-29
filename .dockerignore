@@ -1,0 +1,7 @@
+# Não copiar para a imagem: ela compila o código do zero.
+.git
+sequencial/sequencial
+processos/processos
+threads/threads
+testes/resultados
+**/__pycache__

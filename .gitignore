@@ -1,0 +1,6 @@
+# Executáveis gerados pelo make
+sequencial/sequencial
+processos/processos
+threads/threads
+
+__pycache__/
