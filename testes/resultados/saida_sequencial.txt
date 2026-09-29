@@ -1,0 +1,17 @@
+Simulação finalizada
+
+Carros: 100000
+Tamanho das vias: 100000
+Tempo do semáforo: 30
+Iterações: 3000
+
+Carros que atravessaram: 2446
+Carros no cruzamento: 0
+Carros nas vias: 97554
+
+Fila Norte: 22
+Fila Sul: 20
+Fila Leste: 1
+Fila Oeste: 1
+
+Tempo de execução: 4.271447 segundos

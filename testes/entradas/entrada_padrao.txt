@@ -1,0 +1,14 @@
+# Entrada usada nas medições. Os scripts de teste leem este arquivo e passam
+# os valores na linha de comando dos programas.
+#
+# CARROS          carros distribuídos nas 4 vias no início (até 4 * TAMANHO_VIA)
+# TAMANHO_VIA     número de posições (células) de cada via
+# TEMPO_SEMAFORO  iterações que cada eixo fica com o sinal verde
+# ITERACOES       passos da simulação
+# SEED            semente dos sorteios; a mesma seed gera o mesmo resultado
+
+CARROS=100000
+TAMANHO_VIA=100000
+TEMPO_SEMAFORO=30
+ITERACOES=3000
+SEED=123

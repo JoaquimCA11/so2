@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="460" viewBox="0 0 760 460" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+<rect width="760" height="460" fill="#fcfcfb"/>
+<text x="32.0" y="40.0" font-size="20" fill="#0b0b0b" text-anchor="start" font-weight="600">Gráfico 1 — Tempo de execução</text>
+<text x="32.0" y="64.0" font-size="13" fill="#52514e" text-anchor="start" font-weight="normal">100000 carros, vias de 100000 posições, semáforo de 30 iterações, 3000 iterações — média das execuções</text>
+<rect x="32" y="82" width="12" height="12" rx="3" fill="#1baf7a"/>
+<text x="50.0" y="92.0" font-size="13" fill="#52514e" text-anchor="start" font-weight="normal">Sequencial</text>
+<rect x="154" y="82" width="12" height="12" rx="3" fill="#2a78d6"/>
+<text x="172.0" y="92.0" font-size="13" fill="#52514e" text-anchor="start" font-weight="normal">Processos</text>
+<rect x="268" y="82" width="12" height="12" rx="3" fill="#eb6834"/>
+<text x="286.0" y="92.0" font-size="13" fill="#52514e" text-anchor="start" font-weight="normal">Threads</text>
+<line x1="96" x2="728" y1="390.0" y2="390.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="88.0" y="394.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">0,0</text>
+<line x1="96" x2="728" y1="334.0" y2="334.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="88.0" y="338.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">1,0</text>
+<line x1="96" x2="728" y1="278.0" y2="278.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="88.0" y="282.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">2,0</text>
+<line x1="96" x2="728" y1="222.0" y2="222.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="88.0" y="226.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">3,0</text>
+<line x1="96" x2="728" y1="166.0" y2="166.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="88.0" y="170.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">4,0</text>
+<line x1="96" x2="728" y1="110.0" y2="110.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="88.0" y="114.0" font-size="12" fill="#898781" text-anchor="end" font-weight="normal">5,0</text>
+<text transform="translate(50,250.0) rotate(-90)" font-size="12" fill="#52514e" text-anchor="middle">Tempo médio (s)</text>
+<path d="M140.2,390.0 L140.2,153.6 Q140.2,149.6 144.2,149.6 L174.2,149.6 Q178.2,149.6 178.2,153.6 L178.2,390.0 Z" fill="#1baf7a"/>
+<text x="159.2" y="143.6" font-size="12" fill="#0b0b0b" text-anchor="middle" font-weight="normal">4,29</text>
+<text x="159.2" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">Sequencial</text>
+<path d="M246.7,390.0 L246.7,150.7 Q246.7,146.7 250.7,146.7 L280.6,146.7 Q284.6,146.7 284.6,150.7 L284.6,390.0 Z" fill="#2a78d6"/>
+<path d="M286.6,390.0 L286.6,149.1 Q286.6,145.1 290.6,145.1 L320.5,145.1 Q324.5,145.1 324.5,149.1 L324.5,390.0 Z" fill="#eb6834"/>
+<text x="285.6" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">1</text>
+<path d="M373.1,390.0 L373.1,238.5 Q373.1,234.5 377.1,234.5 L407.0,234.5 Q411.0,234.5 411.0,238.5 L411.0,390.0 Z" fill="#2a78d6"/>
+<path d="M413.0,390.0 L413.0,238.3 Q413.0,234.3 417.0,234.3 L446.9,234.3 Q450.9,234.3 450.9,238.3 L450.9,390.0 Z" fill="#eb6834"/>
+<text x="412.0" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">2</text>
+<path d="M499.5,390.0 L499.5,298.6 Q499.5,294.6 503.5,294.6 L533.4,294.6 Q537.4,294.6 537.4,298.6 L537.4,390.0 Z" fill="#2a78d6"/>
+<path d="M539.4,390.0 L539.4,297.6 Q539.4,293.6 543.4,293.6 L573.3,293.6 Q577.3,293.6 577.3,297.6 L577.3,390.0 Z" fill="#eb6834"/>
+<text x="538.4" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">4</text>
+<path d="M625.9,390.0 L625.9,317.2 Q625.9,313.2 629.9,313.2 L659.8,313.2 Q663.8,313.2 663.8,317.2 L663.8,390.0 Z" fill="#2a78d6"/>
+<text x="644.8" y="307.2" font-size="12" fill="#0b0b0b" text-anchor="middle" font-weight="normal">1,37</text>
+<path d="M665.8,390.0 L665.8,317.7 Q665.8,313.7 669.8,313.7 L699.7,313.7 Q703.7,313.7 703.7,317.7 L703.7,390.0 Z" fill="#eb6834"/>
+<text x="684.8" y="307.7" font-size="12" fill="#0b0b0b" text-anchor="middle" font-weight="normal">1,36</text>
+<text x="664.8" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">8</text>
+<text x="412.0" y="434.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">Trabalhadores (processos ou threads)</text>
+</svg>
